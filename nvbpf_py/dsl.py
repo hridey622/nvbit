@@ -84,13 +84,17 @@ class _ApiTraceField:
         callbacks: list[str] | tuple[str, ...],
         on_exit: bool = True,
         correlate_launches: bool = False,
+        correlate_window_events: int = 8,
         description: str = "",
     ) -> None:
         if not callbacks:
             raise ValueError("api_trace() requires at least one callback")
+        if correlate_window_events <= 0:
+            raise ValueError("api_trace() correlate_window_events must be positive")
         self.callbacks = tuple(callbacks)
         self.on_exit = on_exit
         self.correlate_launches = correlate_launches
+        self.correlate_window_events = correlate_window_events
         self.description = description
 
     def to_spec(self, name: str) -> ApiTraceSpec:
@@ -99,6 +103,7 @@ class _ApiTraceField:
             callbacks=self.callbacks,
             on_exit=self.on_exit,
             correlate_launches=self.correlate_launches,
+            correlate_window_events=self.correlate_window_events,
             description=self.description,
         )
 
@@ -393,12 +398,14 @@ def api_trace(
     callbacks: list[str] | tuple[str, ...],
     on_exit: bool = True,
     correlate_launches: bool = False,
+    correlate_window_events: int = 8,
     description: str = "",
 ) -> _ApiTraceField:
     return _ApiTraceField(
         callbacks=callbacks,
         on_exit=on_exit,
         correlate_launches=correlate_launches,
+        correlate_window_events=correlate_window_events,
         description=description,
     )
 

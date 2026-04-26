@@ -55,6 +55,7 @@ Use this when you want to observe CUDA API events or launch metadata without inj
 
 Example:
 - `nvlink_trace.cu`
+- `multi_gpu_kernel_trace.cu`
 - `gemm_orchestration_map.cu`
 - `epilogue_fusion_trace.cu`
 - `pipeline_depth_estimator.cu`
@@ -75,6 +76,8 @@ For most new tools, copy one of these first:
 - copy `tile_lifetime_tracker.*` if you want producer-to-store lifetime estimates
 - copy `cta_role_classifier.*` if you want sampled CTA behavior families
 - copy `nvlink_trace.cu` if you want host-side API tracing
+- copy `multi_gpu_kernel_trace.cu` if you want multi-GPU launch/context/stream
+  tracing plus nearby copy/sync/alloc activity without assuming NVLink
 - copy `gemm_wavefit_trace.*` if you want CTA wave-fit or per-SM CTA spread
 - copy `gemm_orchestration_map.cu` if you want host-side kernel neighborhood analysis
 - copy `epilogue_fusion_trace.cu` if you want fused-vs-separate epilogue analysis

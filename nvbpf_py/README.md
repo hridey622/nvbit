@@ -433,6 +433,7 @@ class AggregatedLoadSummaryPy:
 peer_copy = api_trace(
     callbacks=["API_CUDA_cuMemcpyPeer", "API_CUDA_cuMemcpyPeerAsync"],
     correlate_launches=True,
+    correlate_window_events=16,
 )
 ```
 
@@ -444,6 +445,11 @@ When `correlate_launches=True`, launch callbacks can also read:
 - `api_trace_value("trace_name")`
 - `api_trace_correlated("trace_name")`
 - `api_trace_delta("trace_name")`
+
+`correlate_window_events=` controls how many CUDA callback events back a trace
+may still be considered "near" a later matched kernel launch. It defaults to
+`8`, which is a good fit for simpler workloads, while framework-heavy runs may
+benefit from a wider window.
 
 That makes it possible to build pure-Python "system context around kernels"
 tools that reason about copies, syncs, and allocation activity between

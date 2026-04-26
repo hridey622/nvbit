@@ -41,7 +41,7 @@ HOOK_FLAGS=$(INCLUDES) $(MAXRREGCOUNT_FLAG) -Xptxas -astoolspatch \
 
 all: instr_count.so mem_trace.so sm_profiler.so attention_debug.so \
      kernel_summary.so attention_trace.so sampling_mem_trace.so branch_divergence.so \
-     nvlink_trace.so gemm_wavefit_trace.so gemm_orchestration_map.so \
+     nvlink_trace.so multi_gpu_kernel_trace.so gemm_wavefit_trace.so gemm_orchestration_map.so \
      epilogue_fusion_trace.so tail_fragment_tracker.so reuse_distance_profiler.so \
      pipeline_depth_estimator.so tile_lifetime_tracker.so \
      bank_conflict_suspicion.so register_pressure_distortion_meter.so \
@@ -140,6 +140,14 @@ nvlink_trace.so: nvlink_trace.o $(NVBIT_PATH)/libnvbit.a
 	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
 
 nvlink_trace.o: nvlink_trace.cu
+	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+# ── multi_gpu_kernel_trace ────────────────────────────────────────────────────
+multi_gpu_kernel_trace.so: multi_gpu_kernel_trace.o $(NVBIT_PATH)/libnvbit.a
+	$(NVCC) -arch=$(ARCH) -O3 multi_gpu_kernel_trace.o \
+	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
+
+multi_gpu_kernel_trace.o: multi_gpu_kernel_trace.cu
 	$(NVCC) $(HOST_FLAGS) $< -o $@
 
 # ── gemm_wavefit_trace ────────────────────────────────────────────────────────

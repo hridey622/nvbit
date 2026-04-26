@@ -25,6 +25,39 @@ struct RecentPeerCopy {
     bool valid = false;
 } recent_peer_copy;
 
+static CUdevice device_for_context(CUcontext target_ctx) {
+    if (target_ctx == nullptr) return (CUdevice)-1;
+
+    CUcontext pushed = nullptr;
+    CUdevice dev = (CUdevice)-1;
+    if (cuCtxPushCurrent(target_ctx) == CUDA_SUCCESS) {
+        cuCtxGetDevice(&dev);
+        cuCtxPopCurrent(&pushed);
+    }
+    return dev;
+}
+
+static CUdevice device_for_pointer(CUdeviceptr ptr) {
+    if (ptr == 0) return (CUdevice)-1;
+
+    CUdevice dev = (CUdevice)-1;
+    if (cuPointerGetAttribute(&dev, CU_POINTER_ATTRIBUTE_DEVICE_ORDINAL, ptr) == CUDA_SUCCESS) {
+        return dev;
+    }
+
+    CUcontext ptr_ctx = nullptr;
+    if (cuPointerGetAttribute(&ptr_ctx, CU_POINTER_ATTRIBUTE_CONTEXT, ptr) == CUDA_SUCCESS) {
+        return device_for_context(ptr_ctx);
+    }
+    return dev;
+}
+
+static CUdevice device_for_context_or_pointer(CUcontext target_ctx, CUdeviceptr ptr) {
+    CUdevice dev = device_for_context(target_ctx);
+    if (dev != (CUdevice)-1) return dev;
+    return device_for_pointer(ptr);
+}
+
 static void print_topology_once() {
     if (topology_printed) return;
     topology_printed = true;
@@ -87,20 +120,26 @@ void nvbit_at_cuda_event(CUcontext ctx, int is_exit, nvbit_api_cuda_t cbid,
     if (cbid == API_CUDA_cuMemcpyPeer || cbid == API_CUDA_cuMemcpyPeer_ptds) {
         CUcontext src_ctx = nullptr;
         CUcontext dst_ctx = nullptr;
+        CUdeviceptr src_ptr = 0;
+        CUdeviceptr dst_ptr = 0;
         size_t bytes = 0;
         if (cbid == API_CUDA_cuMemcpyPeer) {
             cuMemcpyPeer_params* p = (cuMemcpyPeer_params*)params;
             src_ctx = p->srcContext;
             dst_ctx = p->dstContext;
+            src_ptr = p->srcDevice;
+            dst_ptr = p->dstDevice;
             bytes = p->ByteCount;
         } else {
             cuMemcpyPeer_ptds_params* p = (cuMemcpyPeer_ptds_params*)params;
             src_ctx = p->srcContext;
             dst_ctx = p->dstContext;
+            src_ptr = p->srcDevice;
+            dst_ptr = p->dstDevice;
             bytes = p->ByteCount;
         }
-        cuCtxGetDevice_v2(&recent_peer_copy.src_dev, src_ctx);
-        cuCtxGetDevice_v2(&recent_peer_copy.dst_dev, dst_ctx);
+        recent_peer_copy.src_dev = device_for_context_or_pointer(src_ctx, src_ptr);
+        recent_peer_copy.dst_dev = device_for_context_or_pointer(dst_ctx, dst_ptr);
         recent_peer_copy.bytes = bytes;
         recent_peer_copy.event_id = api_event_counter;
         recent_peer_copy.valid = true;
@@ -112,20 +151,26 @@ void nvbit_at_cuda_event(CUcontext ctx, int is_exit, nvbit_api_cuda_t cbid,
         cbid == API_CUDA_cuMemcpyPeerAsync_ptsz) {
         CUcontext src_ctx = nullptr;
         CUcontext dst_ctx = nullptr;
+        CUdeviceptr src_ptr = 0;
+        CUdeviceptr dst_ptr = 0;
         size_t bytes = 0;
         if (cbid == API_CUDA_cuMemcpyPeerAsync) {
             cuMemcpyPeerAsync_params* p = (cuMemcpyPeerAsync_params*)params;
             src_ctx = p->srcContext;
             dst_ctx = p->dstContext;
+            src_ptr = p->srcDevice;
+            dst_ptr = p->dstDevice;
             bytes = p->ByteCount;
         } else {
             cuMemcpyPeerAsync_ptsz_params* p = (cuMemcpyPeerAsync_ptsz_params*)params;
             src_ctx = p->srcContext;
             dst_ctx = p->dstContext;
+            src_ptr = p->srcDevice;
+            dst_ptr = p->dstDevice;
             bytes = p->ByteCount;
         }
-        cuCtxGetDevice_v2(&recent_peer_copy.src_dev, src_ctx);
-        cuCtxGetDevice_v2(&recent_peer_copy.dst_dev, dst_ctx);
+        recent_peer_copy.src_dev = device_for_context_or_pointer(src_ctx, src_ptr);
+        recent_peer_copy.dst_dev = device_for_context_or_pointer(dst_ctx, dst_ptr);
         recent_peer_copy.bytes = bytes;
         recent_peer_copy.event_id = api_event_counter;
         recent_peer_copy.valid = true;

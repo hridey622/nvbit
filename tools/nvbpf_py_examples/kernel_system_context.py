@@ -72,6 +72,7 @@ class KernelSystemContextPy:
             "API_CUDA_cuMemcpyHtoDAsync_v2_ptsz",
         ],
         correlate_launches=True,
+        correlate_window_events=128,
         description="Host-to-device transfer traffic near launches",
     )
     d2h = api_trace(
@@ -84,6 +85,7 @@ class KernelSystemContextPy:
             "API_CUDA_cuMemcpyDtoHAsync_v2_ptsz",
         ],
         correlate_launches=True,
+        correlate_window_events=128,
         description="Device-to-host transfer traffic near launches",
     )
     d2d = api_trace(
@@ -96,6 +98,7 @@ class KernelSystemContextPy:
             "API_CUDA_cuMemcpyDtoDAsync_v2_ptsz",
         ],
         correlate_launches=True,
+        correlate_window_events=128,
         description="Device-to-device transfer traffic near launches",
     )
     sync = api_trace(
@@ -107,6 +110,7 @@ class KernelSystemContextPy:
             "API_CUDA_cuStreamSynchronize_ptsz",
         ],
         correlate_launches=True,
+        correlate_window_events=128,
         description="Explicit synchronization activity near launches",
     )
     alloc = api_trace(
@@ -123,6 +127,7 @@ class KernelSystemContextPy:
             "API_CUDA_cuMemFreeAsync_ptsz",
         ],
         correlate_launches=True,
+        correlate_window_events=128,
         description="Allocation and free activity near launches; byte totals reflect allocation calls",
     )
 

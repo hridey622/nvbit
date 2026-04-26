@@ -34,6 +34,7 @@ class ApiTraceSpec:
     callbacks: tuple[str, ...] = ()
     on_exit: bool = True
     correlate_launches: bool = False
+    correlate_window_events: int = 8
     description: str = ""
 
 

@@ -393,7 +393,7 @@ def _render_api_trace_body(tool: ToolSpec) -> str:
                 [
                     f"            _nvbpf_api_trace_correlated_{trace.name} = false;",
                     f"            _nvbpf_api_trace_delta_{trace.name} = -1;",
-                    f"            if (recent_{trace.name}.valid && api_event_counter - recent_{trace.name}.event_id <= 8) {{",
+                    f"            if (recent_{trace.name}.valid && api_event_counter - recent_{trace.name}.event_id <= {trace.correlate_window_events}) {{",
                     f"                _nvbpf_api_trace_correlated_{trace.name} = true;",
                     f"                _nvbpf_api_trace_delta_{trace.name} = (int64_t)(api_event_counter - recent_{trace.name}.event_id);",
                     f'                printf("        correlated_{trace.name}=1 delta_events=%lu kernel=%s\\n",',
