@@ -42,7 +42,10 @@ HOOK_FLAGS=$(INCLUDES) $(MAXRREGCOUNT_FLAG) -Xptxas -astoolspatch \
 all: instr_count.so mem_trace.so sm_profiler.so attention_debug.so \
      kernel_summary.so attention_trace.so sampling_mem_trace.so branch_divergence.so \
      nvlink_trace.so gemm_wavefit_trace.so gemm_orchestration_map.so \
-     epilogue_fusion_trace.so tail_fragment_tracker.so \
+     epilogue_fusion_trace.so tail_fragment_tracker.so reuse_distance_profiler.so \
+     pipeline_depth_estimator.so tile_lifetime_tracker.so \
+     bank_conflict_suspicion.so register_pressure_distortion_meter.so \
+     cta_role_classifier.so \
      sampling_mem_events.so peer_copy_trace.so
 
 # ── instr_count ──────────────────────────────────────────────────────────────
@@ -175,6 +178,63 @@ tail_fragment_tracker.o: tail_fragment_tracker.cu
 	$(NVCC) $(HOST_FLAGS) $< -o $@
 
 tail_fragment_tracker_hooks.o: tail_fragment_tracker_hooks.cu
+	$(NVCC) $(HOOK_FLAGS) $< -o $@
+
+# ── reuse_distance_profiler ───────────────────────────────────────────────────
+reuse_distance_profiler.so: reuse_distance_profiler.o reuse_distance_profiler_hooks.o $(NVBIT_PATH)/libnvbit.a
+	$(NVCC) -arch=$(ARCH) -O3 reuse_distance_profiler.o reuse_distance_profiler_hooks.o \
+	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
+
+reuse_distance_profiler.o: reuse_distance_profiler.cu
+	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+reuse_distance_profiler_hooks.o: reuse_distance_profiler_hooks.cu
+	$(NVCC) $(HOOK_FLAGS) $< -o $@
+
+# ── pipeline_depth_estimator ──────────────────────────────────────────────────
+pipeline_depth_estimator.so: pipeline_depth_estimator.o $(NVBIT_PATH)/libnvbit.a
+	$(NVCC) -arch=$(ARCH) -O3 pipeline_depth_estimator.o \
+	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
+
+pipeline_depth_estimator.o: pipeline_depth_estimator.cu
+	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+# ── tile_lifetime_tracker ─────────────────────────────────────────────────────
+tile_lifetime_tracker.so: tile_lifetime_tracker.o tile_lifetime_tracker_hooks.o $(NVBIT_PATH)/libnvbit.a
+	$(NVCC) -arch=$(ARCH) -O3 tile_lifetime_tracker.o tile_lifetime_tracker_hooks.o \
+	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
+
+tile_lifetime_tracker.o: tile_lifetime_tracker.cu
+	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+tile_lifetime_tracker_hooks.o: tile_lifetime_tracker_hooks.cu
+	$(NVCC) $(HOOK_FLAGS) $< -o $@
+
+# ── bank_conflict_suspicion ───────────────────────────────────────────────────
+bank_conflict_suspicion.so: bank_conflict_suspicion.o $(NVBIT_PATH)/libnvbit.a
+	$(NVCC) -arch=$(ARCH) -O3 bank_conflict_suspicion.o \
+	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
+
+bank_conflict_suspicion.o: bank_conflict_suspicion.cu
+	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+# ── register_pressure_distortion_meter ────────────────────────────────────────
+register_pressure_distortion_meter.so: register_pressure_distortion_meter.o $(NVBIT_PATH)/libnvbit.a
+	$(NVCC) -arch=$(ARCH) -O3 register_pressure_distortion_meter.o \
+	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
+
+register_pressure_distortion_meter.o: register_pressure_distortion_meter.cu
+	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+# ── cta_role_classifier ───────────────────────────────────────────────────────
+cta_role_classifier.so: cta_role_classifier.o cta_role_classifier_hooks.o $(NVBIT_PATH)/libnvbit.a
+	$(NVCC) -arch=$(ARCH) -O3 cta_role_classifier.o cta_role_classifier_hooks.o \
+	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
+
+cta_role_classifier.o: cta_role_classifier.cu
+	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+cta_role_classifier_hooks.o: cta_role_classifier_hooks.cu
 	$(NVCC) $(HOOK_FLAGS) $< -o $@
 
 # -- BEGIN NVBPF_PY sampling_mem_events --

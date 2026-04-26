@@ -4,9 +4,15 @@ This is a Python-first generator for simple NV-BPF tools.
 
 It is intentionally a restricted DSL, not a compiler for arbitrary Python.
 
+If you want another LLM agent to author tools reliably, start with
+[AGENT_TOOL_AUTHORING.md](/home/hridey/nvbpf/nvbpf_py/AGENT_TOOL_AUTHORING.md:1)
+and copy
+[agent_tool_template.py](/home/hridey/nvbpf/tools/nvbpf_py_examples/agent_tool_template.py:1).
+
 The current DSL supports four authoring styles:
 
 - declare one tool in Python
+- choose substring, exact, or CSV kernel matching at the tool level
 - declare explicit NV-BPF maps such as arrays and per-CPU arrays
 - declare one or more counters
 - declare ring-buffer event schemas
@@ -22,13 +28,71 @@ The current DSL supports four authoring styles:
 from nvbpf_py import tool, counter
 
 
-@tool("atomic_count")
+@tool("atomic_count", kernel_filter_mode="csv", kernel_filter_default="cutlass,gemm")
 class AtomicCount:
     atomics = counter(
         opcodes=["ATOM", "RED"],
         description="Count atomic and reduction instructions",
     )
 ```
+
+## Scaffold A New Tool
+
+You can generate a starter Python DSL spec instead of copying an example by
+hand:
+
+```bash
+python3 -m nvbpf_py.cli scaffold global_load_report
+```
+
+This writes:
+
+```text
+tools/nvbpf_py_examples/global_load_report.py
+```
+
+Available scaffold styles:
+
+- `minimal`
+- `hook-report`
+- `aggregated`
+- `api-trace`
+- `gemm-wavefit`
+- `gemm-orchestration`
+- `epilogue-fusion`
+- `tail-fragment`
+
+Examples:
+
+```bash
+python3 -m nvbpf_py.cli scaffold my_memory_tool --style hook-report
+python3 -m nvbpf_py.cli scaffold nightly_summary --style aggregated
+python3 -m nvbpf_py.cli scaffold my_gemm_wavefit --style gemm-wavefit
+```
+
+## Smallest Useful Tool
+
+```python
+from nvbpf_py import counter, counter_value, on_launch_exit, short_kernel_name, tool
+
+
+@tool("minimal_load_report_py", banner="MINIMAL_LOAD_REPORT_PY")
+class MinimalLoadReportPy:
+    loads = counter(loads=True)
+
+    @on_launch_exit()
+    def report():
+        print(
+            "kernel=", short_kernel_name(),
+            "loads=", counter_value("loads"),
+        )
+```
+
+This is the smallest practical Python-authored NV-BPF tool right now:
+
+- `counter(loads=True)` tells NV-BPF to count load instructions
+- `@on_launch_exit()` prints one summary line after each kernel launch
+- no handwritten `.cu` or `_hooks.cu` files are needed
 
 ## Supported Counter Predicates
 
@@ -76,6 +140,50 @@ active_sm_bitmap = array(type_name="u64", length=4)
 
 In this first version, explicit maps are mainly used by the higher-level GEMM
 host analyzers described below.
+
+## Host State And Lifecycle Callbacks
+
+The DSL now supports persistent host-side state for cross-launch summaries.
+
+```python
+total_launches = host_scalar(type_name="u64")
+load_buckets = host_array(type_name="u64", length=4)
+```
+
+Supported host-side lifecycle callbacks:
+
+- `@on_tool_init()`
+- `@on_launch_enter()`
+- `@on_launch_exit()`
+- `@on_term()`
+
+You can declare multiple callbacks for the same lifecycle stage. They run in
+class declaration order, which makes it easy to split reporting, aggregation,
+and gating logic into smaller pieces.
+
+Tool-level kernel matching is also configurable now:
+
+- `kernel_filter_mode="substring"`: existing substring match behavior
+- `kernel_filter_mode="exact"`: require the full demangled kernel name to match
+- `kernel_filter_mode="csv"`: treat the filter as comma-separated substrings
+
+`kernel_filter_default="..."` lets a spec ship with a built-in default filter,
+while `kernel_filter_env=` still overrides it at runtime.
+
+Inside these host callbacks, you can now:
+
+- read and write host scalars directly by name
+- read and update host arrays with:
+  - `state_get(...)`
+  - `state_set(...)`
+  - `state_add(...)`
+- read API trace totals with `api_trace_value(...)`
+- read integer environment variables with `env_int(...)`
+- test flag-style environment variables with `env_flag(...)`
+
+This is the main step toward making the DSL easy for LLM agents to use for
+new custom tools, because tools can now keep cross-launch state and emit final
+end-of-run summaries without hand-written C++ host code.
 
 ## Custom Device Hooks
 
@@ -238,6 +346,9 @@ Useful launch-exit helpers:
 
 - `counter_value("counter_name")`
 - `map_value("map_name", index)`
+- `api_trace_value("trace_name")`
+- `api_trace_correlated("trace_name")`
+- `api_trace_delta("trace_name")`
 - `kernel_name()`
 - `short_kernel_name()`
 - `grid_dim_x()` / `grid_dim_y()` / `grid_dim_z()`
@@ -246,8 +357,75 @@ Useful launch-exit helpers:
 - `smem_static()`
 - `smem_dynamic()`
 
-`@on_launch_enter()` and `@on_launch_exit()` each support one callback per tool
-in this version.
+Multiple `@on_launch_enter()`, `@on_launch_exit()`, `@on_tool_init()`, and
+`@on_term()` callbacks are supported and run in declaration order.
+
+Example with a more targeted CUTLASS filter and split launch-exit logic:
+
+```python
+from nvbpf_py import counter, counter_value, on_launch_exit, short_kernel_name, tool
+
+
+@tool(
+    "cutlass_focus_py",
+    banner="CUTLASS_FOCUS_PY",
+    kernel_filter_mode="csv",
+    kernel_filter_default="cutlass::Kernel2,kernel_cutlass_kernel",
+)
+class CutlassFocusPy:
+    loads = counter(loads=True)
+
+    @on_launch_exit()
+    def report_name():
+        print("kernel=", short_kernel_name())
+
+    @on_launch_exit()
+    def report_loads():
+        print("loads=", counter_value("loads"))
+```
+
+Example with persistent host state:
+
+```python
+from nvbpf_py import (
+    counter,
+    counter_value,
+    host_array,
+    host_scalar,
+    on_launch_exit,
+    on_term,
+    state_add,
+    state_get,
+    tool,
+)
+
+
+@tool("aggregated_load_summary_py", banner="AGGREGATED_LOAD_SUMMARY_PY")
+class AggregatedLoadSummaryPy:
+    total_launches = host_scalar(type_name="u64")
+    total_loads = host_scalar(type_name="u64")
+    load_buckets = host_array(type_name="u64", length=4)
+    loads = counter(loads=True)
+
+    @on_launch_exit()
+    def accumulate():
+        launch_loads = counter_value("loads")
+        total_launches += 1
+        total_loads += launch_loads
+        if launch_loads <= 1000:
+            state_add("load_buckets", 0)
+        else:
+            state_add("load_buckets", 1)
+
+    @on_term()
+    def final_report():
+        print(
+            "launches=", total_launches,
+            "total_loads=", total_loads,
+            "b0=", state_get("load_buckets", 0),
+            "b1=", state_get("load_buckets", 1),
+        )
+```
 
 ## Host-only CUDA API Traces
 
@@ -260,6 +438,39 @@ peer_copy = api_trace(
 
 This generates a host-only tool that watches CUDA API callbacks and can
 correlate recent traced events with kernel launches.
+
+When `correlate_launches=True`, launch callbacks can also read:
+
+- `api_trace_value("trace_name")`
+- `api_trace_correlated("trace_name")`
+- `api_trace_delta("trace_name")`
+
+That makes it possible to build pure-Python "system context around kernels"
+tools that reason about copies, syncs, and allocation activity between
+launches.
+
+Example:
+
+```python
+from nvbpf_py import api_trace, api_trace_correlated, api_trace_delta, api_trace_value, on_launch_exit, short_kernel_name, tool
+
+
+@tool("kernel_system_context_py", kernel_filter_mode="csv", kernel_filter_default="cutlass::Kernel2,kernel_cutlass_kernel")
+class KernelSystemContextPy:
+    sync = api_trace(
+        callbacks=["API_CUDA_cuCtxSynchronize", "API_CUDA_cuStreamSynchronize"],
+        correlate_launches=True,
+    )
+
+    @on_launch_exit()
+    def report():
+        print(
+            "kernel=", short_kernel_name(),
+            "sync_hits=", api_trace_value("sync"),
+            "sync_near=", int(api_trace_correlated("sync")),
+            "sync_delta=", api_trace_delta("sync"),
+        )
+```
 
 ## Higher-level GEMM Host Analyzers
 
@@ -404,6 +615,14 @@ python3 -m nvbpf_py.cli run \
   -- ./test-apps/vectoradd/matrix_add
 ```
 
+Full authoring flow:
+
+```bash
+python3 -m nvbpf_py.cli scaffold global_load_report --style minimal
+python3 -m nvbpf_py.cli build --force --compile tools/nvbpf_py_examples/global_load_report.py
+python3 -m nvbpf_py.cli run tools/nvbpf_py_examples/global_load_report.py -- ./test-apps/vectoradd/matrix_add
+```
+
 ## Best Use Cases Right Now
 
 - opcode counters
@@ -422,11 +641,13 @@ There are example specs in:
 - `tools/nvbpf_py_examples/tail_fragment.py`
 - `tools/nvbpf_py_examples/python_only_report.py`
 - `tools/nvbpf_py_examples/loop_bucket_report.py`
+- `tools/nvbpf_py_examples/aggregated_load_summary.py`
+- `tools/nvbpf_py_examples/agent_tool_template.py`
+- `tools/nvbpf_py_examples/kernel_system_context.py`
 
 ## Not In This DSL Yet
 
 - arbitrary Python in hooks
 - cross-hook shared local state
-- generic Python-authored host callbacks and launch-neighborhood logic
 - reusable Python-level helpers for CUDA API parameter struct decoding
 - arbitrary Python-authored launch-neighborhood analyzers

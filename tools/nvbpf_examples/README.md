@@ -40,6 +40,9 @@ Examples:
 - `branch_divergence.cu` + `branch_divergence_hooks.cu`
 - `gemm_wavefit_trace.cu` + `gemm_wavefit_trace_hooks.cu`
 - `tail_fragment_tracker.cu` + `tail_fragment_tracker_hooks.cu`
+- `reuse_distance_profiler.cu` + `reuse_distance_profiler_hooks.cu`
+- `tile_lifetime_tracker.cu` + `tile_lifetime_tracker_hooks.cu`
+- `cta_role_classifier.cu` + `cta_role_classifier_hooks.cu`
 
 These tools usually use:
 - `BPF_ARRAY(...)`
@@ -54,6 +57,9 @@ Example:
 - `nvlink_trace.cu`
 - `gemm_orchestration_map.cu`
 - `epilogue_fusion_trace.cu`
+- `pipeline_depth_estimator.cu`
+- `bank_conflict_suspicion.cu`
+- `register_pressure_distortion_meter.cu`
 
 This style does not need a `_hooks.cu` file.
 
@@ -65,10 +71,16 @@ For most new tools, copy one of these first:
 - copy `sampling_mem_trace.*` if you want memory events
 - copy `branch_divergence.*` if you want branch-only logic
 - copy `tail_fragment_tracker.*` if you want edge/tail inefficiency estimates
+- copy `reuse_distance_profiler.*` if you want sampled memory-line reuse estimates
+- copy `tile_lifetime_tracker.*` if you want producer-to-store lifetime estimates
+- copy `cta_role_classifier.*` if you want sampled CTA behavior families
 - copy `nvlink_trace.cu` if you want host-side API tracing
 - copy `gemm_wavefit_trace.*` if you want CTA wave-fit or per-SM CTA spread
 - copy `gemm_orchestration_map.cu` if you want host-side kernel neighborhood analysis
 - copy `epilogue_fusion_trace.cu` if you want fused-vs-separate epilogue analysis
+- copy `pipeline_depth_estimator.cu` if you want producer/consumer staging estimates
+- copy `bank_conflict_suspicion.cu` if you want shared-memory conflict heuristics
+- copy `register_pressure_distortion_meter.cu` if you want occupancy-vs-register tradeoff estimates
 
 Then change only:
 
@@ -297,6 +309,34 @@ python3 test-apps/attention_pytorch/attention_pytorch.py --backend math
 `NVBPF_VERBOSE=1` for the per-launch detail dump, and `NVBPF_FULL_NAMES=1` for
 unshortened kernel names.
 
+## Plotting Tool Output
+
+You can turn NV-BPF logs into CSV summaries and SVG plots with
+[`../nvbpf_analysis`](../nvbpf_analysis).
+
+Example:
+
+```bash
+ACK_CTX_INIT_LIMITATION=1 \
+NVBPF_GEMM_FILTER=sgemm \
+LD_PRELOAD=$(pwd)/tools/nvbpf_examples/gemm_wavefit_trace.so \
+python3 test-apps/attention_pytorch/attention_pytorch.py --backend math \
+  | tee gemm_wavefit_math.log
+
+python3 tools/nvbpf_analysis/plot_tool_output.py \
+  --input gemm_wavefit_math.log \
+  --output-dir tools/nvbpf_analysis/out
+```
+
+The current plotter understands:
+
+- `kernel_summary`
+- `sampling_mem_trace`
+- `gemm_wavefit_trace`
+- `gemm_orchestration_map`
+- `epilogue_fusion_trace`
+- `tail_fragment_tracker`
+
 ## Which Example Should I Copy?
 
 - `instr_count`: simplest counting pattern
@@ -304,10 +344,16 @@ unshortened kernel names.
 - `sampling_mem_trace`: best memory-event template
 - `branch_divergence`: best branch-analysis template
 - `tail_fragment_tracker`: best tail/edge inefficiency template
+- `reuse_distance_profiler`: best sampled line-reuse template
+- `tile_lifetime_tracker`: best producer-to-store lifetime template
+- `cta_role_classifier`: best sampled CTA behavior template
 - `attention_trace`: best workload-specific template
 - `gemm_wavefit_trace`: best wave-quantization template
 - `gemm_orchestration_map`: best kernel-neighborhood template
 - `epilogue_fusion_trace`: best fused-vs-separate epilogue template
+- `pipeline_depth_estimator`: best producer/consumer staging template
+- `bank_conflict_suspicion`: best shared-memory conflict heuristic template
+- `register_pressure_distortion_meter`: best occupancy-vs-register tradeoff template
 - `nvlink_trace`: best host-only trace template
 
 ## Rule Of Thumb

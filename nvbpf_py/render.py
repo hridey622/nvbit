@@ -11,6 +11,7 @@ from .model import (
     DeviceHookSpec,
     EventFieldSpec,
     EventSpec,
+    HostStateSpec,
     MapSpec,
     ToolSpec,
 )
@@ -18,6 +19,8 @@ from .transpile import (
     HookRender,
     LaunchExitRender,
     render_custom_hook,
+    render_term_callback,
+    render_tool_init_callback,
     render_launch_enter_callback,
     render_launch_exit_callback,
 )
@@ -87,6 +90,25 @@ def _map_decl(map_spec: MapSpec) -> str:
         )
     suffix = f"  // {map_spec.description}" if map_spec.description else ""
     return f"{macro}({map_spec.name}, {type_name}, {map_spec.length});{suffix}"
+
+
+def _host_state_decl(state_spec: HostStateSpec) -> str:
+    type_name = _TYPE_MAP.get(state_spec.type_name)
+    if type_name is None:
+        raise RuntimeError(
+            f"unsupported host state type {state_spec.type_name!r} for state {state_spec.name!r}"
+        )
+    suffix = f"  // {state_spec.description}" if state_spec.description else ""
+    if state_spec.kind == "scalar":
+        return (
+            f"static {type_name} _nvbpf_state_{state_spec.name} = "
+            f"({type_name})({state_spec.initial});{suffix}"
+        )
+    if state_spec.kind == "array":
+        return (
+            f"static {type_name} _nvbpf_state_{state_spec.name}[{state_spec.length}] = {{}};{suffix}"
+        )
+    raise RuntimeError(f"unsupported host state kind: {state_spec.kind}")
 
 
 def _map_by_name(tool: ToolSpec, name: str) -> MapSpec:
@@ -255,9 +277,81 @@ def _render_api_trace_statics(tool: ToolSpec) -> str:
     ]
     for trace in tool.api_traces:
         blocks.append(f"static uint64_t {trace.name}_hits = 0;")
+        blocks.append(f"static uint64_t {trace.name}_bytes = 0;")
         if trace.correlate_launches:
             blocks.append(f"static RecentApiTrace recent_{trace.name};")
+            blocks.append(f"static bool _nvbpf_api_trace_correlated_{trace.name} = false;")
+            blocks.append(f"static int64_t _nvbpf_api_trace_delta_{trace.name} = -1;")
     return "\n".join(blocks)
+
+
+def _render_api_trace_read_helpers(tool: ToolSpec) -> str:
+    if not tool.api_traces:
+        return ""
+    blocks: list[str] = []
+    for trace in tool.api_traces:
+        blocks.append(f"static uint64_t _nvbpf_read_api_trace_{trace.name}() {{ return {trace.name}_hits; }}")
+        blocks.append(
+            f"static uint64_t _nvbpf_read_api_trace_bytes_{trace.name}() {{ return {trace.name}_bytes; }}"
+        )
+    return "\n".join(blocks)
+
+
+def _render_api_trace_bytes_helper() -> str:
+    return """static uint64_t _nvbpf_api_trace_bytes_for_cbid(nvbit_api_cuda_t cbid, void* params) {
+    switch (cbid) {
+        case API_CUDA_cuMemcpyHtoD:
+            return ((cuMemcpyHtoD_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyHtoD_v2:
+            return ((cuMemcpyHtoD_v2_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyHtoD_v2_ptds:
+            return ((cuMemcpyHtoD_v2_ptds_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyHtoDAsync:
+            return ((cuMemcpyHtoDAsync_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyHtoDAsync_v2:
+            return ((cuMemcpyHtoDAsync_v2_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyHtoDAsync_v2_ptsz:
+            return ((cuMemcpyHtoDAsync_v2_ptsz_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoH:
+            return ((cuMemcpyDtoH_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoH_v2:
+            return ((cuMemcpyDtoH_v2_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoH_v2_ptds:
+            return ((cuMemcpyDtoH_v2_ptds_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoHAsync:
+            return ((cuMemcpyDtoHAsync_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoHAsync_v2:
+            return ((cuMemcpyDtoHAsync_v2_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoHAsync_v2_ptsz:
+            return ((cuMemcpyDtoHAsync_v2_ptsz_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoD:
+            return ((cuMemcpyDtoD_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoD_v2:
+            return ((cuMemcpyDtoD_v2_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoD_v2_ptds:
+            return ((cuMemcpyDtoD_v2_ptds_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoDAsync:
+            return ((cuMemcpyDtoDAsync_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoDAsync_v2:
+            return ((cuMemcpyDtoDAsync_v2_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyDtoDAsync_v2_ptsz:
+            return ((cuMemcpyDtoDAsync_v2_ptsz_params*)params)->ByteCount;
+        case API_CUDA_cuMemAlloc:
+            return ((cuMemAlloc_params*)params)->bytesize;
+        case API_CUDA_cuMemAlloc_v2:
+            return ((cuMemAlloc_v2_params*)params)->bytesize;
+        case API_CUDA_cuMemAllocAsync:
+            return ((cuMemAllocAsync_params*)params)->bytesize;
+        case API_CUDA_cuMemAllocAsync_ptsz:
+            return ((cuMemAllocAsync_ptsz_params*)params)->bytesize;
+        case API_CUDA_cuMemAllocFromPoolAsync:
+            return ((cuMemAllocFromPoolAsync_params*)params)->bytesize;
+        case API_CUDA_cuMemAllocFromPoolAsync_ptsz:
+            return ((cuMemAllocFromPoolAsync_ptsz_params*)params)->bytesize;
+        default:
+            return 0ULL;
+    }
+}"""
 
 
 def _render_api_trace_body(tool: ToolSpec) -> str:
@@ -271,7 +365,9 @@ def _render_api_trace_body(tool: ToolSpec) -> str:
         lines.extend(
             [
                 f"    if (is_exit == {'1' if trace.on_exit else '0'} && ({cond})) {{",
+                "        uint64_t trace_bytes = _nvbpf_api_trace_bytes_for_cbid(cbid, params);",
                 f"        {trace.name}_hits++;",
+                f"        {trace.name}_bytes += trace_bytes;",
             ]
         )
         if trace.correlate_launches:
@@ -287,18 +383,32 @@ def _render_api_trace_body(tool: ToolSpec) -> str:
                 "    }",
             ]
         )
-    lines.append("    if (is_launch && is_exit) {")
+    lines.append("    if (is_launch) {")
     lines.append("        CUfunction launch_func = nvbpf_get_launch_func(cbid, params);")
     lines.append('        const char* launch_name = nvbit_get_func_name(ctx, launch_func);')
-    lines.append("        if (kernel_name_filter.empty() || strstr(launch_name, kernel_name_filter.c_str()) != nullptr) {")
+    lines.append("        if (_nvbpf_kernel_name_matches(launch_name)) {")
     for trace in tool.api_traces:
         if trace.correlate_launches:
             lines.extend(
                 [
+                    f"            _nvbpf_api_trace_correlated_{trace.name} = false;",
+                    f"            _nvbpf_api_trace_delta_{trace.name} = -1;",
                     f"            if (recent_{trace.name}.valid && api_event_counter - recent_{trace.name}.event_id <= 8) {{",
+                    f"                _nvbpf_api_trace_correlated_{trace.name} = true;",
+                    f"                _nvbpf_api_trace_delta_{trace.name} = (int64_t)(api_event_counter - recent_{trace.name}.event_id);",
                     f'                printf("        correlated_{trace.name}=1 delta_events=%lu kernel=%s\\n",',
                     f"                       api_event_counter - recent_{trace.name}.event_id, launch_name);",
                     "            }",
+                ]
+            )
+    lines.append("        }")
+    lines.append("        else {")
+    for trace in tool.api_traces:
+        if trace.correlate_launches:
+            lines.extend(
+                [
+                    f"            _nvbpf_api_trace_correlated_{trace.name} = false;",
+                    f"            _nvbpf_api_trace_delta_{trace.name} = -1;",
                 ]
             )
     lines.append("        }")
@@ -310,7 +420,7 @@ def _render_api_trace_term(tool: ToolSpec) -> str:
     if not tool.api_traces:
         return ""
     return "\n".join(
-        f'    printf("[NVBPF {tool.banner}] api_trace {trace.name} hits=%lu\\n", {trace.name}_hits);'
+        f'    printf("[NVBPF {tool.banner}] api_trace {trace.name} hits=%lu bytes=%lu\\n", {trace.name}_hits, {trace.name}_bytes);'
         for trace in tool.api_traces
     )
 
@@ -454,6 +564,48 @@ static std::string _nvbpf_compact_kernel_name(const char* raw) {
     }
     return name.substr(0, 24) + "..." + name.substr(name.size() - 24);
 }"""
+
+
+def _render_host_env_helper() -> str:
+    return """static long _nvbpf_env_int(const char* name, long default_value) {
+    const char* env = getenv(name);
+    if (env == nullptr || *env == '\\0') {
+        return default_value;
+    }
+    return strtol(env, nullptr, 0);
+}"""
+
+
+def _render_csv_match_helper() -> str:
+    return """static bool _nvbpf_csv_match(const char* name, const std::string& csv) {
+    size_t start = 0;
+    while (start < csv.size()) {
+        size_t end = csv.find(',', start);
+        if (end == std::string::npos) end = csv.size();
+        std::string tok = csv.substr(start, end - start);
+        if (!tok.empty() && strstr(name, tok.c_str()) != nullptr) return true;
+        start = end + 1;
+    }
+    return false;
+}"""
+
+
+def _render_kernel_filter_helper(tool: ToolSpec) -> str:
+    mode = tool.kernel_filter_mode
+    if mode == "substring":
+        match_expr = "strstr(func_name, kernel_name_filter.c_str()) != nullptr"
+    elif mode == "exact":
+        match_expr = "strcmp(func_name, kernel_name_filter.c_str()) == 0"
+    elif mode == "csv":
+        match_expr = "_nvbpf_csv_match(func_name, kernel_name_filter)"
+    else:
+        raise RuntimeError(f"unsupported kernel filter mode: {mode}")
+    return f"""static bool _nvbpf_kernel_name_matches(const char* func_name) {{
+    if (kernel_name_filter.empty()) {{
+        return true;
+    }}
+    return {match_expr};
+}}"""
 
 
 def _render_gemm_wavefit_host(tool: ToolSpec) -> str:
@@ -2126,6 +2278,12 @@ def render_host(tool: ToolSpec, out_dir: Path, core_relpath: str) -> str:
     prefix = _sanitize_ident(tool.name)
     has_device = _has_device_part(tool)
     has_launch_callbacks = bool(tool.launch_enter_callbacks or tool.launch_exit_callbacks)
+    has_host_callbacks = bool(
+        tool.tool_init_callbacks
+        or tool.launch_enter_callbacks
+        or tool.launch_exit_callbacks
+        or tool.term_callbacks
+    )
     has_opcode_checks = any(c.opcodes for c in tool.counters) or any(h.opcodes for h in tool.device_hooks)
     has_branch_checks = any(c.branches for c in tool.counters) or any(h.branches for h in tool.device_hooks)
     launch_state_decls = ""
@@ -2157,6 +2315,8 @@ def render_host(tool: ToolSpec, out_dir: Path, core_relpath: str) -> str:
     events_by_name = {event.name: event for event in tool.events}
     counters_by_name = {counter.name for counter in tool.counters}
     maps_by_name = {map_spec.name: map_spec for map_spec in tool.maps}
+    host_states_by_name = {state.name: state for state in tool.host_states}
+    api_traces_by_name = {trace.name: trace for trace in tool.api_traces}
     for hook in tool.device_hooks:
         hook_render = render_custom_hook(hook, events_by_name, counters_by_name, maps_by_name)
         externs.append(
@@ -2164,20 +2324,30 @@ def render_host(tool: ToolSpec, out_dir: Path, core_relpath: str) -> str:
             + ", ".join(hook_render.signature_params)
             + ");"
         )
-    launch_enter_render: LaunchExitRender | None = None
-    if tool.launch_enter_callbacks:
-        launch_enter_render = render_launch_enter_callback(
-            tool.launch_enter_callbacks[0],
-            maps_by_name,
-            counters_by_name,
+    tool_init_renders = [
+        render_tool_init_callback(
+            callback, maps_by_name, counters_by_name, host_states_by_name, api_traces_by_name
         )
-    launch_exit_render: LaunchExitRender | None = None
-    if tool.launch_exit_callbacks:
-        launch_exit_render = render_launch_exit_callback(
-            tool.launch_exit_callbacks[0],
-            maps_by_name,
-            counters_by_name,
+        for callback in tool.tool_init_callbacks
+    ]
+    launch_enter_renders = [
+        render_launch_enter_callback(
+            callback, maps_by_name, counters_by_name, host_states_by_name, api_traces_by_name
         )
+        for callback in tool.launch_enter_callbacks
+    ]
+    launch_exit_renders = [
+        render_launch_exit_callback(
+            callback, maps_by_name, counters_by_name, host_states_by_name, api_traces_by_name
+        )
+        for callback in tool.launch_exit_callbacks
+    ]
+    term_renders = [
+        render_term_callback(
+            callback, maps_by_name, counters_by_name, host_states_by_name, api_traces_by_name
+        )
+        for callback in tool.term_callbacks
+    ]
 
     reset_lines = "\n".join(
         [f"    {map_spec.name}.reset();" for map_spec in tool.maps]
@@ -2198,33 +2368,39 @@ def render_host(tool: ToolSpec, out_dir: Path, core_relpath: str) -> str:
         f"auto* value = {map_spec.name}.lookup(idx); return value ? *value : ({_TYPE_MAP[map_spec.type_name]})0; }}"
         for map_spec in tool.maps
     )
+    host_state_decls = "\n".join(_host_state_decl(state_spec) for state_spec in tool.host_states)
     counter_read_helpers = "\n".join(
         f"static uint64_t _nvbpf_read_counter_{counter.name}() {{ "
         f"auto* value = {counter.name}.lookup(0); return value ? *value : 0ULL; }}"
         for counter in tool.counters
     )
+    api_trace_read_helpers = _render_api_trace_read_helpers(tool)
+    api_trace_bytes_helper = _render_api_trace_bytes_helper() if tool.api_traces else ""
     launch_config_helper = _render_launch_config_helper() if has_launch_callbacks else ""
-    compact_name_helper = _render_compact_name_helper() if has_launch_callbacks else ""
+    compact_name_helper = _render_compact_name_helper() if has_host_callbacks else ""
+    host_env_helper = _render_host_env_helper() if has_host_callbacks else ""
+    csv_match_helper = _render_csv_match_helper() if tool.kernel_filter_mode == "csv" else ""
+    kernel_filter_helper = _render_kernel_filter_helper(tool)
     device_instrumentation = _render_device_instrumentation(tool, prefix) if has_device else ""
     device_body = ""
     if has_device:
         counter_print = (
             f'        printf("        {print_pairs}\\n", {print_values});'
-            if tool.counters and launch_exit_render is None
+            if tool.counters and not launch_exit_renders
             else ""
         )
         launch_enter_block = ""
-        if launch_enter_render is not None:
+        if launch_enter_renders:
             launch_enter_block = (
                 "            func_config_t func_cfg = _nvbpf_get_launch_config(ctx, func, cbid, params);\n"
-                + launch_enter_render.body
+                + "\n".join(render.body for render in launch_enter_renders)
                 + "\n"
             )
         launch_exit_block = ""
-        if launch_exit_render is not None:
+        if launch_exit_renders:
             launch_exit_block = (
                 "        func_config_t func_cfg = _nvbpf_get_launch_config(ctx, func, cbid, params);\n"
-                + launch_exit_render.body
+                + "\n".join(render.body for render in launch_exit_renders)
                 + "\n"
             )
         device_body = f"""    if (!is_launch) return;
@@ -2232,8 +2408,7 @@ def render_host(tool: ToolSpec, out_dir: Path, core_relpath: str) -> str:
     const char* func_name = nvbit_get_func_name(ctx, func);
 
     if (!is_exit) {{
-        bool match = kernel_name_filter.empty() ||
-                     strstr(func_name, kernel_name_filter.c_str()) != nullptr;
+        bool match = _nvbpf_kernel_name_matches(func_name);
         pthread_mutex_lock(&launch_mutex);
         if (match) {{
             instrument_function_if_needed(ctx, func);
@@ -2246,8 +2421,7 @@ def render_host(tool: ToolSpec, out_dir: Path, core_relpath: str) -> str:
         if (!match) pthread_mutex_unlock(&launch_mutex);
     }} else {{
         cudaDeviceSynchronize();
-        if (!kernel_name_filter.empty() &&
-            strstr(func_name, kernel_name_filter.c_str()) == nullptr) {{
+        if (!_nvbpf_kernel_name_matches(func_name)) {{
             return;
         }}
         printf("[NVBPF] %s\\n", func_name);
@@ -2258,33 +2432,31 @@ def render_host(tool: ToolSpec, out_dir: Path, core_relpath: str) -> str:
     }}"""
     elif has_launch_callbacks:
         launch_enter_block = ""
-        if launch_enter_render is not None:
+        if launch_enter_renders:
             launch_enter_block = (
                 "        func_config_t func_cfg = _nvbpf_get_launch_config(ctx, func, cbid, params);\n"
-                + launch_enter_render.body
+                + "\n".join(render.body for render in launch_enter_renders)
                 + "\n"
             )
         launch_exit_block = ""
-        if launch_exit_render is not None:
+        if launch_exit_renders:
             launch_exit_block = (
                 "        func_config_t func_cfg = _nvbpf_get_launch_config(ctx, func, cbid, params);\n"
-                + launch_exit_render.body
+                + "\n".join(render.body for render in launch_exit_renders)
                 + "\n"
             )
         device_body = f"""    if (!is_launch) return;
     CUfunction func = nvbpf_get_launch_func(cbid, params);
     const char* func_name = nvbit_get_func_name(ctx, func);
     if (!is_exit) {{
-        if (!kernel_name_filter.empty() &&
-            strstr(func_name, kernel_name_filter.c_str()) == nullptr) {{
+        if (!_nvbpf_kernel_name_matches(func_name)) {{
             return;
         }}
         printf("[NVBPF] %s\\n", func_name);
 {launch_enter_block}
         return;
     }}
-    if (!kernel_name_filter.empty() &&
-        strstr(func_name, kernel_name_filter.c_str()) == nullptr) {{
+    if (!_nvbpf_kernel_name_matches(func_name)) {{
         return;
     }}
     printf("[NVBPF] %s\\n", func_name);
@@ -2298,6 +2470,7 @@ def render_host(tool: ToolSpec, out_dir: Path, core_relpath: str) -> str:
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sstream>
 #include <string.h>
 #include <string>
@@ -2313,15 +2486,21 @@ def render_host(tool: ToolSpec, out_dir: Path, core_relpath: str) -> str:
 
 {chr(10).join(externs)}
 
+{host_state_decls}
 {launch_state_decls}
 static std::string kernel_name_filter;
 {"static bool verbose = false;" if tool.events else ""}
 {_render_api_trace_statics(tool)}
 
 {counter_read_helpers}
+{api_trace_read_helpers}
+{api_trace_bytes_helper}
 {map_read_helpers}
 {launch_config_helper}
 {compact_name_helper}
+{host_env_helper}
+{csv_match_helper}
+{kernel_filter_helper}
 
 {"static bool opcode_starts_with(const char* opcode, const char* prefix) { return strncmp(opcode, prefix, strlen(prefix)) == 0; }" if has_opcode_checks else ""}
 {"static bool is_branch_opcode(const char* opcode) { return strncmp(opcode, \"BRA\", 3) == 0 || strncmp(opcode, \"JMP\", 3) == 0 || strncmp(opcode, \"JMX\", 3) == 0 || strncmp(opcode, \"BRX\", 3) == 0 || strncmp(opcode, \"CALL\", 4) == 0 || strncmp(opcode, \"RET\", 3) == 0 || strncmp(opcode, \"EXIT\", 4) == 0; }" if has_branch_checks else ""}
@@ -2346,12 +2525,14 @@ void nvbit_at_init() {{
     setenv("ACK_CTX_INIT_LIMITATION", "1", 1);
     {"setenv(\"CUDA_MANAGED_FORCE_DEVICE_ALLOC\", \"1\", 1);" if has_device else ""}
 {launch_state_init}
+    kernel_name_filter = "{_quote_cpp(tool.kernel_filter_default)}";
     if (const char* env = getenv("{_quote_cpp(tool.kernel_filter_env)}")) {{
         kernel_name_filter = env;
     }}
     {"verbose = getenv(\"NVBPF_VERBOSE\") != nullptr;" if tool.events else ""}
-    {"_nvbpf_full_names = getenv(\"NVBPF_FULL_NAMES\") != nullptr;" if has_launch_callbacks else ""}
+    {"_nvbpf_full_names = getenv(\"NVBPF_FULL_NAMES\") != nullptr;" if has_host_callbacks else ""}
     printf("[NVBPF {tool.banner}] Tool loaded\\n");
+{("".join(render.body + chr(10) for render in tool_init_renders)) if tool_init_renders else ""}
 }}
 
 void nvbit_at_cuda_event(CUcontext ctx, int is_exit, nvbit_api_cuda_t cbid,
@@ -2363,6 +2544,7 @@ void nvbit_at_cuda_event(CUcontext ctx, int is_exit, nvbit_api_cuda_t cbid,
 
 void nvbit_at_term() {{
 {_render_api_trace_term(tool)}
+{("".join(render.body + chr(10) for render in term_renders)) if term_renders else ""}
     printf("[NVBPF {tool.banner}] Tool terminated\\n");
 }}
 """

@@ -13,10 +13,13 @@ from .model import (
     EventSpec,
     GemmOrchestrationSpec,
     GemmWavefitSpec,
+    HostStateSpec,
     LaunchEnterCallbackSpec,
     LaunchExitCallbackSpec,
     MapSpec,
     TailFragmentSpec,
+    TermCallbackSpec,
+    ToolInitCallbackSpec,
     ToolSpec,
 )
 
@@ -122,6 +125,35 @@ class _MapField:
             kind=self.kind,
             type_name=self.type_name,
             length=self.length,
+            description=self.description,
+        )
+
+
+class _HostStateField:
+    def __init__(
+        self,
+        *,
+        kind: str,
+        type_name: str,
+        length: int,
+        initial: int = 0,
+        description: str = "",
+    ) -> None:
+        if length <= 0:
+            raise ValueError("host state length must be positive")
+        self.kind = kind
+        self.type_name = type_name
+        self.length = length
+        self.initial = initial
+        self.description = description
+
+    def to_spec(self, name: str) -> HostStateSpec:
+        return HostStateSpec(
+            name=name,
+            kind=self.kind,
+            type_name=self.type_name,
+            length=self.length,
+            initial=int(self.initial),
             description=self.description,
         )
 
@@ -292,6 +324,40 @@ class _LaunchEnterDecorator:
         return fn
 
 
+class _ToolInitDecorator:
+    def __init__(self, *, description: str = "") -> None:
+        self.description = description
+
+    def __call__(self, fn: Any) -> Any:
+        source = textwrap.dedent(inspect.getsource(fn))
+        sig = inspect.signature(fn)
+        if len(sig.parameters) != 0:
+            raise ValueError("@on_tool_init callbacks must not take arguments in this DSL version")
+        fn._nvbpf_tool_init = ToolInitCallbackSpec(
+            name=fn.__name__,
+            source=source,
+            description=self.description,
+        )
+        return fn
+
+
+class _TermDecorator:
+    def __init__(self, *, description: str = "") -> None:
+        self.description = description
+
+    def __call__(self, fn: Any) -> Any:
+        source = textwrap.dedent(inspect.getsource(fn))
+        sig = inspect.signature(fn)
+        if len(sig.parameters) != 0:
+            raise ValueError("@on_term callbacks must not take arguments in this DSL version")
+        fn._nvbpf_term = TermCallbackSpec(
+            name=fn.__name__,
+            source=source,
+            description=self.description,
+        )
+        return fn
+
+
 def counter(
     *,
     opcodes: list[str] | tuple[str, ...] | None = None,
@@ -403,6 +469,37 @@ def percpu_array(
     )
 
 
+def host_scalar(
+    *,
+    type_name: str,
+    initial: int = 0,
+    description: str = "",
+) -> _HostStateField:
+    return _HostStateField(
+        kind="scalar",
+        type_name=type_name,
+        length=1,
+        initial=initial,
+        description=description,
+    )
+
+
+def host_array(
+    *,
+    type_name: str,
+    length: int,
+    initial: int = 0,
+    description: str = "",
+) -> _HostStateField:
+    return _HostStateField(
+        kind="array",
+        type_name=type_name,
+        length=length,
+        initial=initial,
+        description=description,
+    )
+
+
 def gemm_wavefit(
     *,
     sm_cta_entries_map: str,
@@ -473,6 +570,14 @@ def on_launch_exit(*, description: str = "") -> _LaunchExitDecorator:
 
 def on_launch_enter(*, description: str = "") -> _LaunchEnterDecorator:
     return _LaunchEnterDecorator(description=description)
+
+
+def on_tool_init(*, description: str = "") -> _ToolInitDecorator:
+    return _ToolInitDecorator(description=description)
+
+
+def on_term(*, description: str = "") -> _TermDecorator:
+    return _TermDecorator(description=description)
 
 
 def count(name: str) -> None:
@@ -547,27 +652,70 @@ def smem_dynamic() -> int:
     raise RuntimeError("smem_dynamic() is only valid inside an NV-BPF Python launch-exit callback")
 
 
+def state_get(name: str, index: int) -> Any:
+    raise RuntimeError("state_get() is only valid inside an NV-BPF Python host callback")
+
+
+def state_set(name: str, index: int, value: Any) -> None:
+    raise RuntimeError("state_set() is only valid inside an NV-BPF Python host callback")
+
+
+def state_add(name: str, index: int, value: Any = 1) -> None:
+    raise RuntimeError("state_add() is only valid inside an NV-BPF Python host callback")
+
+
+def env_int(name: str, default: int = 0) -> int:
+    raise RuntimeError("env_int() is only valid inside an NV-BPF Python host callback")
+
+
+def env_flag(name: str) -> bool:
+    raise RuntimeError("env_flag() is only valid inside an NV-BPF Python host callback")
+
+
+def api_trace_value(name: str) -> int:
+    raise RuntimeError("api_trace_value() is only valid inside an NV-BPF Python host callback")
+
+
+def api_trace_bytes_value(name: str) -> int:
+    raise RuntimeError("api_trace_bytes_value() is only valid inside an NV-BPF Python host callback")
+
+
+def api_trace_correlated(name: str) -> bool:
+    raise RuntimeError("api_trace_correlated() is only valid inside an NV-BPF Python launch callback")
+
+
+def api_trace_delta(name: str) -> int:
+    raise RuntimeError("api_trace_delta() is only valid inside an NV-BPF Python launch callback")
+
+
 def tool(
     name: str,
     *,
     kernel_filter_env: str = "NVBPF_KERNEL_FILTER",
+    kernel_filter_mode: str = "substring",
+    kernel_filter_default: str = "",
     banner: str | None = None,
 ):
     def decorator(cls: type[Any]) -> type[Any]:
+        host_states: list[HostStateSpec] = []
         maps: list[MapSpec] = []
         counters: list[CounterSpec] = []
         events: list[EventSpec] = []
         api_traces: list[ApiTraceSpec] = []
         device_hooks: list[DeviceHookSpec] = []
+        tool_init_callbacks: list[ToolInitCallbackSpec] = []
         launch_enter_callbacks: list[LaunchEnterCallbackSpec] = []
         launch_exit_callbacks: list[LaunchExitCallbackSpec] = []
+        term_callbacks: list[TermCallbackSpec] = []
         gemm_wavefit_spec: GemmWavefitSpec | None = None
         gemm_orchestration_spec: GemmOrchestrationSpec | None = None
         epilogue_fusion_spec: EpilogueFusionSpec | None = None
         tail_fragment_spec: TailFragmentSpec | None = None
 
         for attr_name, value in cls.__dict__.items():
-            if isinstance(value, _MapField):
+            if isinstance(value, _HostStateField):
+                host_states.append(value.to_spec(attr_name))
+            elif isinstance(value, _MapField):
                 maps.append(value.to_spec(attr_name))
             elif isinstance(value, _CounterField):
                 counters.append(value.to_spec(attr_name))
@@ -601,12 +749,18 @@ def tool(
             hook_spec = getattr(value, "_nvbpf_device_hook", None)
             if isinstance(hook_spec, DeviceHookSpec):
                 device_hooks.append(hook_spec)
+            tool_init_spec = getattr(value, "_nvbpf_tool_init", None)
+            if isinstance(tool_init_spec, ToolInitCallbackSpec):
+                tool_init_callbacks.append(tool_init_spec)
             launch_enter_spec = getattr(value, "_nvbpf_launch_enter", None)
             if isinstance(launch_enter_spec, LaunchEnterCallbackSpec):
                 launch_enter_callbacks.append(launch_enter_spec)
             launch_exit_spec = getattr(value, "_nvbpf_launch_exit", None)
             if isinstance(launch_exit_spec, LaunchExitCallbackSpec):
                 launch_exit_callbacks.append(launch_exit_spec)
+            term_spec = getattr(value, "_nvbpf_term", None)
+            if isinstance(term_spec, TermCallbackSpec):
+                term_callbacks.append(term_spec)
 
         specialized_count = sum(
             spec is not None
@@ -624,9 +778,9 @@ def tool(
 
         maps_by_name = {spec.name: spec for spec in maps}
         if gemm_wavefit_spec is not None:
-            if counters or events or api_traces or device_hooks:
+            if host_states or counters or events or api_traces or device_hooks or tool_init_callbacks or launch_enter_callbacks or launch_exit_callbacks or term_callbacks:
                 raise ValueError(
-                    f"tool {name!r} uses gemm_wavefit(); combine it only with explicit maps in this DSL version"
+                    f"tool {name!r} uses gemm_wavefit(); combine it only with explicit device maps in this DSL version"
                 )
             sm_entries = maps_by_name.get(gemm_wavefit_spec.sm_cta_entries_map)
             if sm_entries is None:
@@ -646,39 +800,40 @@ def tool(
                 raise ValueError(
                     "gemm_wavefit() requires active_sm_bitmap_map to be an array(type_name='u64', ...)"
                 )
-        if gemm_orchestration_spec is not None and (maps or counters or events or api_traces or device_hooks):
+        if gemm_orchestration_spec is not None and (host_states or maps or counters or events or api_traces or device_hooks):
             raise ValueError(
                 f"tool {name!r} uses gemm_orchestration_map(); keep it host-only in this DSL version"
             )
-        if epilogue_fusion_spec is not None and (maps or counters or events or api_traces or device_hooks):
+        if epilogue_fusion_spec is not None and (host_states or maps or counters or events or api_traces or device_hooks):
             raise ValueError(
                 f"tool {name!r} uses epilogue_fusion_trace(); keep it host-only in this DSL version"
             )
-        if tail_fragment_spec is not None and (maps or counters or events or api_traces or device_hooks):
+        if tail_fragment_spec is not None and (host_states or maps or counters or events or api_traces or device_hooks):
             raise ValueError(
                 f"tool {name!r} uses tail_fragment_tracker(); keep it standalone in this DSL version"
             )
-        if (gemm_wavefit_spec or gemm_orchestration_spec or epilogue_fusion_spec or tail_fragment_spec) and (launch_enter_callbacks or launch_exit_callbacks):
+        if (gemm_wavefit_spec or gemm_orchestration_spec or epilogue_fusion_spec or tail_fragment_spec) and (tool_init_callbacks or launch_enter_callbacks or launch_exit_callbacks or term_callbacks):
             raise ValueError(
                 f"tool {name!r} cannot combine launch callbacks with specialized analyses in this DSL version"
             )
-        if len(launch_enter_callbacks) > 1:
+        if kernel_filter_mode not in {"substring", "exact", "csv"}:
             raise ValueError(
-                f"tool {name!r} declares multiple @on_launch_enter callbacks; only one is supported right now"
-            )
-        if len(launch_exit_callbacks) > 1:
-            raise ValueError(
-                f"tool {name!r} declares multiple @on_launch_exit callbacks; only one is supported right now"
+                f"tool {name!r} uses unsupported kernel_filter_mode={kernel_filter_mode!r}; "
+                "expected one of: substring, exact, csv"
             )
 
         if (
+            not host_states
+            and
             not maps
             and not counters
             and not events
             and not api_traces
             and not device_hooks
+            and not tool_init_callbacks
             and not launch_enter_callbacks
             and not launch_exit_callbacks
+            and not term_callbacks
             and gemm_wavefit_spec is None
             and gemm_orchestration_spec is None
             and epilogue_fusion_spec is None
@@ -690,18 +845,23 @@ def tool(
 
         cls.tool_spec = ToolSpec(
             name=name,
+            host_states=tuple(host_states),
             maps=tuple(maps),
             counters=tuple(counters),
             events=tuple(events),
             device_hooks=tuple(device_hooks),
+            tool_init_callbacks=tuple(tool_init_callbacks),
             launch_enter_callbacks=tuple(launch_enter_callbacks),
             launch_exit_callbacks=tuple(launch_exit_callbacks),
+            term_callbacks=tuple(term_callbacks),
             api_traces=tuple(api_traces),
             gemm_wavefit=gemm_wavefit_spec,
             gemm_orchestration=gemm_orchestration_spec,
             epilogue_fusion=epilogue_fusion_spec,
             tail_fragment=tail_fragment_spec,
             kernel_filter_env=kernel_filter_env,
+            kernel_filter_mode=kernel_filter_mode,
+            kernel_filter_default=kernel_filter_default,
             banner=banner or name.upper(),
         )
         return cls

@@ -4,11 +4,15 @@ import ast
 from dataclasses import dataclass
 
 from .model import (
+    ApiTraceSpec,
     DeviceHookSpec,
     EventSpec,
+    HostStateSpec,
     LaunchEnterCallbackSpec,
     LaunchExitCallbackSpec,
     MapSpec,
+    TermCallbackSpec,
+    ToolInitCallbackSpec,
 )
 
 
@@ -459,26 +463,34 @@ def render_custom_hook(
     return _HookTranspiler(hook, events, counters, maps).render()
 
 
-class _LaunchExitTranspiler:
+class _HostCallbackTranspiler:
     def __init__(
         self,
-        callback: LaunchExitCallbackSpec,
+        callback: LaunchEnterCallbackSpec | LaunchExitCallbackSpec | ToolInitCallbackSpec | TermCallbackSpec,
         maps: dict[str, MapSpec],
         counters: set[str],
+        host_states: dict[str, HostStateSpec],
+        api_traces: dict[str, ApiTraceSpec],
+        *,
+        metadata_enabled: bool,
     ) -> None:
         self.callback = callback
         self.maps = maps
         self.counters = counters
+        self.host_states = host_states
+        self.api_traces = api_traces
+        self.metadata_enabled = metadata_enabled
         self.indent = 2
         self.lines: list[str] = []
         self.locals: set[str] = set()
         self.print_index = 0
+        self.loop_depth = 0
 
     def render(self) -> LaunchExitRender:
         tree = ast.parse(self.callback.source)
         fn = next((node for node in tree.body if isinstance(node, ast.FunctionDef)), None)
         if fn is None:
-            raise TranspileError(f"could not find function body for launch-exit callback {self.callback.name}")
+            raise TranspileError(f"could not find function body for callback {self.callback.name}")
         for stmt in fn.body:
             self._stmt(stmt)
         return LaunchExitRender(body="\n".join(self.lines))
@@ -503,19 +515,55 @@ class _LaunchExitTranspiler:
             return
         if isinstance(stmt, ast.Return):
             if stmt.value is not None:
-                raise TranspileError("return with a value is not supported in launch-exit callbacks")
+                raise TranspileError("return with a value is not supported in host callbacks")
             self._emit("return;")
             return
         if isinstance(stmt, ast.Assign):
             if len(stmt.targets) != 1 or not isinstance(stmt.targets[0], ast.Name):
-                raise TranspileError("only simple assignments are supported in launch-exit callbacks")
+                raise TranspileError("only simple assignments are supported in host callbacks")
             name = stmt.targets[0].id
             expr = self._expr(stmt.value)
-            if name in self.locals:
+            if name in self.host_states:
+                host_state = self.host_states[name]
+                if host_state.kind != "scalar":
+                    raise TranspileError(f"host array {name!r} must be accessed via state_get/state_set/state_add")
+                self._emit(f"_nvbpf_state_{name} = {expr};")
+            elif name in self.locals:
                 self._emit(f"{name} = {expr};")
             else:
                 self.locals.add(name)
                 self._emit(f"auto {name} = {expr};")
+            return
+        if isinstance(stmt, ast.AugAssign):
+            if not isinstance(stmt.target, ast.Name):
+                raise TranspileError("only simple augmented assignments are supported in host callbacks")
+            op = _BIN_OPS.get(type(stmt.op))
+            if op is None:
+                raise TranspileError(f"unsupported augmented assignment operator: {type(stmt.op).__name__}")
+            target_name = stmt.target.id
+            expr = self._expr(stmt.value)
+            if target_name in self.host_states:
+                host_state = self.host_states[target_name]
+                if host_state.kind != "scalar":
+                    raise TranspileError(f"host array {target_name!r} must be accessed via state_get/state_set/state_add")
+                self._emit(f"_nvbpf_state_{target_name} = (_nvbpf_state_{target_name} {op} {expr});")
+            else:
+                self._emit(f"{target_name} = ({target_name} {op} {expr});")
+            return
+        if isinstance(stmt, ast.For):
+            self._for_stmt(stmt)
+            return
+        if isinstance(stmt, ast.Break):
+            if self.loop_depth <= 0:
+                raise TranspileError("break is only supported inside host callback for-loops")
+            self._emit("break;")
+            return
+        if isinstance(stmt, ast.Continue):
+            if self.loop_depth <= 0:
+                raise TranspileError("continue is only supported inside host callback for-loops")
+            self._emit("continue;")
+            return
+        if isinstance(stmt, ast.Pass):
             return
         if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
             call = stmt.value
@@ -523,19 +571,62 @@ class _LaunchExitTranspiler:
                 for line in self._print_call(call):
                     self._emit(line)
                 return
+            if isinstance(call.func, ast.Name) and call.func.id == "state_set":
+                self._emit(self._state_set_call(call))
+                return
+            if isinstance(call.func, ast.Name) and call.func.id == "state_add":
+                self._emit(self._state_add_call(call))
+                return
         raise TranspileError(
-            "unsupported statement in launch-exit callback "
+            "unsupported statement in host callback "
             f"{self.callback.name}: {ast.dump(stmt, include_attributes=False)}"
         )
 
+    def _for_stmt(self, stmt: ast.For) -> None:
+        if not isinstance(stmt.target, ast.Name):
+            raise TranspileError("for-loops in host callbacks require a simple loop variable")
+        if not isinstance(stmt.iter, ast.Call) or not isinstance(stmt.iter.func, ast.Name) or stmt.iter.func.id != "range":
+            raise TranspileError("only for ... in range(...) loops are supported in host callbacks")
+        if stmt.iter.keywords:
+            raise TranspileError("range() keyword arguments are not supported in host callbacks")
+        args = stmt.iter.args
+        if len(args) == 1:
+            start_expr = "0"
+            stop_expr = self._expr(args[0])
+            step_expr = "1"
+        elif len(args) == 2:
+            start_expr = self._expr(args[0])
+            stop_expr = self._expr(args[1])
+            step_expr = "1"
+        elif len(args) == 3:
+            start_expr = self._expr(args[0])
+            stop_expr = self._expr(args[1])
+            step_arg = args[2]
+            if not isinstance(step_arg, ast.Constant) or not isinstance(step_arg.value, int) or step_arg.value <= 0:
+                raise TranspileError("range(..., ..., step) currently requires a positive integer literal step")
+            step_expr = str(step_arg.value)
+        else:
+            raise TranspileError("range() in host callbacks supports 1 to 3 positional arguments")
+        if stmt.orelse:
+            raise TranspileError("for-else is not supported in host callbacks")
+        loop_var = stmt.target.id
+        self._emit(f"for (int {loop_var} = {start_expr}; {loop_var} < {stop_expr}; {loop_var} += {step_expr}) {{")
+        self.indent += 1
+        self.loop_depth += 1
+        for inner in stmt.body:
+            self._stmt(inner)
+        self.loop_depth -= 1
+        self.indent -= 1
+        self._emit("}")
+
     def _print_call(self, call: ast.Call) -> list[str]:
         if call.keywords:
-            raise TranspileError("print() keyword arguments are not supported in launch-exit callbacks")
+            raise TranspileError("print() keyword arguments are not supported in host callbacks")
         idx = self.print_index
         self.print_index += 1
         lines = [f"std::ostringstream _nvbpf_oss_{idx};"]
         if not call.args:
-            lines.append(f'printf("\\n");')
+            lines.append('printf("\\n");')
             return lines
         first = True
         for arg in call.args:
@@ -548,8 +639,36 @@ class _LaunchExitTranspiler:
         lines.append(f'printf("%s\\n", _nvbpf_oss_{idx}.str().c_str());')
         return lines
 
+    def _state_set_call(self, call: ast.Call) -> str:
+        if len(call.args) != 3 or not isinstance(call.args[0], ast.Constant) or not isinstance(call.args[0].value, str):
+            raise TranspileError("state_set() expects a host-array name string literal, an index expression, and a value expression")
+        state_name = call.args[0].value
+        state_spec = self.host_states.get(state_name)
+        if state_spec is None:
+            raise TranspileError(f"state_set() references unknown host state {state_name!r}")
+        if state_spec.kind != "array":
+            raise TranspileError(f"state_set() expects a host array, got scalar {state_name!r}")
+        return f"_nvbpf_state_{state_name}[{self._expr(call.args[1])}] = {self._expr(call.args[2])};"
+
+    def _state_add_call(self, call: ast.Call) -> str:
+        if len(call.args) not in (2, 3) or not isinstance(call.args[0], ast.Constant) or not isinstance(call.args[0].value, str):
+            raise TranspileError("state_add() expects a host-array name string literal, an index expression, and an optional value expression")
+        state_name = call.args[0].value
+        state_spec = self.host_states.get(state_name)
+        if state_spec is None:
+            raise TranspileError(f"state_add() references unknown host state {state_name!r}")
+        if state_spec.kind != "array":
+            raise TranspileError(f"state_add() expects a host array, got scalar {state_name!r}")
+        value_expr = "1" if len(call.args) == 2 else self._expr(call.args[2])
+        return f"_nvbpf_state_{state_name}[{self._expr(call.args[1])}] += {value_expr};"
+
     def _expr(self, expr: ast.expr) -> str:
         if isinstance(expr, ast.Name):
+            if expr.id in self.host_states:
+                state_spec = self.host_states[expr.id]
+                if state_spec.kind != "scalar":
+                    raise TranspileError(f"host array {expr.id!r} must be accessed via state_get/state_set/state_add")
+                return f"_nvbpf_state_{expr.id}"
             return expr.id
         if isinstance(expr, ast.Constant):
             if isinstance(expr.value, bool):
@@ -600,6 +719,67 @@ class _LaunchExitTranspiler:
                 if map_name not in self.maps:
                     raise TranspileError(f"map_value() references unknown map {map_name!r}")
                 return f"_nvbpf_read_map_{map_name}({self._expr(expr.args[1])})"
+            if func_name == "state_get":
+                if len(expr.args) != 2 or not isinstance(expr.args[0], ast.Constant) or not isinstance(expr.args[0].value, str):
+                    raise TranspileError("state_get() expects a host-array name string literal and an index expression")
+                state_name = expr.args[0].value
+                state_spec = self.host_states.get(state_name)
+                if state_spec is None:
+                    raise TranspileError(f"state_get() references unknown host state {state_name!r}")
+                if state_spec.kind != "array":
+                    raise TranspileError(f"state_get() expects a host array, got scalar {state_name!r}")
+                return f"_nvbpf_state_{state_name}[{self._expr(expr.args[1])}]"
+            if func_name == "env_int":
+                if len(expr.args) not in (1, 2) or not isinstance(expr.args[0], ast.Constant) or not isinstance(expr.args[0].value, str):
+                    raise TranspileError("env_int() expects an environment-variable name string literal and an optional default")
+                default_expr = "0" if len(expr.args) == 1 else self._expr(expr.args[1])
+                return f'_nvbpf_env_int("{expr.args[0].value}", {default_expr})'
+            if func_name == "env_flag":
+                if len(expr.args) != 1 or not isinstance(expr.args[0], ast.Constant) or not isinstance(expr.args[0].value, str):
+                    raise TranspileError("env_flag() expects an environment-variable name string literal")
+                return f'(getenv("{expr.args[0].value}") != nullptr)'
+            if func_name == "api_trace_value":
+                if len(expr.args) != 1 or not isinstance(expr.args[0], ast.Constant) or not isinstance(expr.args[0].value, str):
+                    raise TranspileError("api_trace_value() expects one trace name string literal")
+                trace_name = expr.args[0].value
+                if trace_name not in self.api_traces:
+                    raise TranspileError(f"api_trace_value() references unknown api trace {trace_name!r}")
+                return f"_nvbpf_read_api_trace_{trace_name}()"
+            if func_name == "api_trace_bytes_value":
+                if len(expr.args) != 1 or not isinstance(expr.args[0], ast.Constant) or not isinstance(expr.args[0].value, str):
+                    raise TranspileError("api_trace_bytes_value() expects one trace name string literal")
+                trace_name = expr.args[0].value
+                if trace_name not in self.api_traces:
+                    raise TranspileError(f"api_trace_bytes_value() references unknown api trace {trace_name!r}")
+                return f"_nvbpf_read_api_trace_bytes_{trace_name}()"
+            if func_name == "api_trace_correlated":
+                if len(expr.args) != 1 or not isinstance(expr.args[0], ast.Constant) or not isinstance(expr.args[0].value, str):
+                    raise TranspileError("api_trace_correlated() expects one trace name string literal")
+                trace_name = expr.args[0].value
+                trace = self.api_traces.get(trace_name)
+                if trace is None:
+                    raise TranspileError(f"api_trace_correlated() references unknown api trace {trace_name!r}")
+                if not self.metadata_enabled:
+                    raise TranspileError("api_trace_correlated() is only available in launch callbacks")
+                if not trace.correlate_launches:
+                    raise TranspileError(
+                        f"api_trace_correlated() requires api_trace({trace_name!r}, correlate_launches=True)"
+                    )
+                return f"_nvbpf_api_trace_correlated_{trace_name}"
+            if func_name == "api_trace_delta":
+                if len(expr.args) != 1 or not isinstance(expr.args[0], ast.Constant) or not isinstance(expr.args[0].value, str):
+                    raise TranspileError("api_trace_delta() expects one trace name string literal")
+                trace_name = expr.args[0].value
+                trace = self.api_traces.get(trace_name)
+                if trace is None:
+                    raise TranspileError(f"api_trace_delta() references unknown api trace {trace_name!r}")
+                if not self.metadata_enabled:
+                    raise TranspileError("api_trace_delta() is only available in launch callbacks")
+                if not trace.correlate_launches:
+                    raise TranspileError(
+                        f"api_trace_delta() requires api_trace({trace_name!r}, correlate_launches=True)"
+                    )
+                return f"_nvbpf_api_trace_delta_{trace_name}"
             metadata = {
                 "kernel_name": "func_name",
                 "short_kernel_name": "_nvbpf_compact_kernel_name(func_name)",
@@ -614,12 +794,14 @@ class _LaunchExitTranspiler:
                 "smem_dynamic": "func_cfg.shmem_dynamic_nbytes",
             }
             if func_name in metadata:
+                if not self.metadata_enabled:
+                    raise TranspileError(f"{func_name}() is only available in launch callbacks")
                 if expr.args:
                     raise TranspileError(f"{func_name}() does not take arguments")
                 return metadata[func_name]
 
         raise TranspileError(
-            "unsupported expression in launch-exit callback "
+            "unsupported expression in host callback "
             f"{self.callback.name}: {ast.dump(expr, include_attributes=False)}"
         )
 
@@ -628,13 +810,65 @@ def render_launch_exit_callback(
     callback: LaunchExitCallbackSpec,
     maps: dict[str, MapSpec],
     counters: set[str],
+    host_states: dict[str, HostStateSpec],
+    api_traces: dict[str, ApiTraceSpec],
 ) -> LaunchExitRender:
-    return _LaunchExitTranspiler(callback, maps, counters).render()
+    return _HostCallbackTranspiler(
+        callback,
+        maps,
+        counters,
+        host_states,
+        api_traces,
+        metadata_enabled=True,
+    ).render()
 
 
 def render_launch_enter_callback(
     callback: LaunchEnterCallbackSpec,
     maps: dict[str, MapSpec],
     counters: set[str],
+    host_states: dict[str, HostStateSpec],
+    api_traces: dict[str, ApiTraceSpec],
 ) -> LaunchExitRender:
-    return _LaunchExitTranspiler(callback, maps, counters).render()
+    return _HostCallbackTranspiler(
+        callback,
+        maps,
+        counters,
+        host_states,
+        api_traces,
+        metadata_enabled=True,
+    ).render()
+
+
+def render_tool_init_callback(
+    callback: ToolInitCallbackSpec,
+    maps: dict[str, MapSpec],
+    counters: set[str],
+    host_states: dict[str, HostStateSpec],
+    api_traces: dict[str, ApiTraceSpec],
+) -> LaunchExitRender:
+    return _HostCallbackTranspiler(
+        callback,
+        maps,
+        counters,
+        host_states,
+        api_traces,
+        metadata_enabled=False,
+    ).render()
+
+
+def render_term_callback(
+    callback: TermCallbackSpec,
+    maps: dict[str, MapSpec],
+    counters: set[str],
+    host_states: dict[str, HostStateSpec],
+    api_traces: dict[str, ApiTraceSpec],
+) -> LaunchExitRender:
+    return _HostCallbackTranspiler(
+        callback,
+        maps,
+        counters,
+        host_states,
+        api_traces,
+        metadata_enabled=False,
+    ).render()
