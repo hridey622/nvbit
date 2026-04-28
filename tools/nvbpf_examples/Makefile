@@ -41,7 +41,9 @@ HOOK_FLAGS=$(INCLUDES) $(MAXRREGCOUNT_FLAG) -Xptxas -astoolspatch \
 
 all: instr_count.so mem_trace.so sm_profiler.so attention_debug.so \
      kernel_summary.so attention_trace.so sampling_mem_trace.so branch_divergence.so \
-     nvlink_trace.so multi_gpu_kernel_trace.so gemm_wavefit_trace.so gemm_orchestration_map.so \
+     nvlink_trace.so multi_gpu_kernel_trace.so megakernel_sync_debugger.so \
+     megakernel_phase_comm_proof.so \
+     gemm_wavefit_trace.so gemm_orchestration_map.so \
      epilogue_fusion_trace.so tail_fragment_tracker.so reuse_distance_profiler.so \
      pipeline_depth_estimator.so tile_lifetime_tracker.so \
      bank_conflict_suspicion.so register_pressure_distortion_meter.so \
@@ -149,6 +151,28 @@ multi_gpu_kernel_trace.so: multi_gpu_kernel_trace.o $(NVBIT_PATH)/libnvbit.a
 
 multi_gpu_kernel_trace.o: multi_gpu_kernel_trace.cu
 	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+# ── megakernel_sync_debugger ──────────────────────────────────────────────────
+megakernel_sync_debugger.so: megakernel_sync_debugger.o megakernel_sync_debugger_hooks.o $(NVBIT_PATH)/libnvbit.a
+	$(NVCC) -arch=$(ARCH) -O3 megakernel_sync_debugger.o megakernel_sync_debugger_hooks.o \
+	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
+
+megakernel_sync_debugger.o: megakernel_sync_debugger.cu
+	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+megakernel_sync_debugger_hooks.o: megakernel_sync_debugger_hooks.cu
+	$(NVCC) $(HOOK_FLAGS) $< -o $@
+
+# ── megakernel_phase_comm_proof ──────────────────────────────────────────────
+megakernel_phase_comm_proof.so: megakernel_phase_comm_proof.o megakernel_phase_comm_proof_hooks.o $(NVBIT_PATH)/libnvbit.a
+	$(NVCC) -arch=$(ARCH) -O3 megakernel_phase_comm_proof.o megakernel_phase_comm_proof_hooks.o \
+	        $(LIBS) $(NVCC_PATH) -lcuda -lcudart_static -shared -o $@
+
+megakernel_phase_comm_proof.o: megakernel_phase_comm_proof.cu
+	$(NVCC) $(HOST_FLAGS) $< -o $@
+
+megakernel_phase_comm_proof_hooks.o: megakernel_phase_comm_proof_hooks.cu
+	$(NVCC) $(HOOK_FLAGS) $< -o $@
 
 # ── gemm_wavefit_trace ────────────────────────────────────────────────────────
 gemm_wavefit_trace.so: gemm_wavefit_trace.o gemm_wavefit_trace_hooks.o $(NVBIT_PATH)/libnvbit.a

@@ -22,6 +22,11 @@ The current DSL supports four authoring styles:
 - generate a host `.cu`, a `_hooks.cu`, and a `Makefile`
 - build the resulting `.so`
 
+For Blackwell/B200 megakernel triage, see
+[blackwell_megakernel_stack.py](/home/hridey/nvbpf/tools/nvbpf_py_examples/blackwell_megakernel_stack.py:1)
+and the direct NVBPF stack in
+[tools/blackwell_b200](/home/hridey/nvbpf/tools/blackwell_b200/README.md:1).
+
 ## Example
 
 ```python

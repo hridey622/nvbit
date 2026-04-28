@@ -36,6 +36,8 @@ Use this when you want to count instructions, sample memory, or track per-SM sta
 Examples:
 - `instr_count.cu` + `instr_count_hooks.cu`
 - `kernel_summary.cu` + `kernel_summary_hooks.cu`
+- `megakernel_sync_debugger.cu` + `megakernel_sync_debugger_hooks.cu`
+- `megakernel_phase_comm_proof.cu` + `megakernel_phase_comm_proof_hooks.cu`
 - `sampling_mem_trace.cu` + `sampling_mem_trace_hooks.cu`
 - `branch_divergence.cu` + `branch_divergence_hooks.cu`
 - `gemm_wavefit_trace.cu` + `gemm_wavefit_trace_hooks.cu`
@@ -69,6 +71,12 @@ This style does not need a `_hooks.cu` file.
 For most new tools, copy one of these first:
 
 - copy `kernel_summary.*` if you want per-kernel counters
+- copy `megakernel_sync_debugger.*` if you want one tool that combines
+  multi-GPU launch/API context with in-kernel sync and memory counters
+- copy `megakernel_phase_comm_proof.*` if you want a two-pass proof of
+  megakernel phase order plus async peer-copy/kernel overlap from CUDA events
+- include `nvbpf_phase_markers.cuh` in CUDA sources when you want semantic
+  source markers such as producer, handoff, consumer, scale, or multicast
 - copy `sampling_mem_trace.*` if you want memory events
 - copy `branch_divergence.*` if you want branch-only logic
 - copy `tail_fragment_tracker.*` if you want edge/tail inefficiency estimates

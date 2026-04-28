@@ -336,6 +336,20 @@ def _render_api_trace_bytes_helper() -> str:
             return ((cuMemcpyDtoDAsync_v2_params*)params)->ByteCount;
         case API_CUDA_cuMemcpyDtoDAsync_v2_ptsz:
             return ((cuMemcpyDtoDAsync_v2_ptsz_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpy:
+            return ((cuMemcpy_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyAsync:
+            return ((cuMemcpyAsync_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyAsync_ptsz:
+            return ((cuMemcpyAsync_ptsz_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyPeer:
+            return ((cuMemcpyPeer_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyPeer_ptds:
+            return ((cuMemcpyPeer_ptds_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyPeerAsync:
+            return ((cuMemcpyPeerAsync_params*)params)->ByteCount;
+        case API_CUDA_cuMemcpyPeerAsync_ptsz:
+            return ((cuMemcpyPeerAsync_ptsz_params*)params)->ByteCount;
         case API_CUDA_cuMemAlloc:
             return ((cuMemAlloc_params*)params)->bytesize;
         case API_CUDA_cuMemAlloc_v2:
@@ -379,7 +393,7 @@ def _render_api_trace_body(tool: ToolSpec) -> str:
             )
         lines.extend(
             [
-                f'        printf("[NVBPF] api_trace {trace.name} event=%s\\n", name);',
+                f'        if (getenv("NVBPF_TRACE_API") != nullptr) printf("[NVBPF] api_trace {trace.name} event=%s\\n", name);',
                 "    }",
             ]
         )
@@ -396,7 +410,7 @@ def _render_api_trace_body(tool: ToolSpec) -> str:
                     f"            if (recent_{trace.name}.valid && api_event_counter - recent_{trace.name}.event_id <= {trace.correlate_window_events}) {{",
                     f"                _nvbpf_api_trace_correlated_{trace.name} = true;",
                     f"                _nvbpf_api_trace_delta_{trace.name} = (int64_t)(api_event_counter - recent_{trace.name}.event_id);",
-                    f'                printf("        correlated_{trace.name}=1 delta_events=%lu kernel=%s\\n",',
+                    f'                if (getenv("NVBPF_TRACE_API") != nullptr) printf("        correlated_{trace.name}=1 delta_events=%lu kernel=%s\\n",',
                     f"                       api_event_counter - recent_{trace.name}.event_id, launch_name);",
                     "            }",
                 ]
@@ -767,7 +781,7 @@ static void launch_dims(nvbit_api_cuda_t cbid, void* params,
 
 void nvbit_at_init() {{
     setenv("ACK_CTX_INIT_LIMITATION", "1", 1);
-    setenv("CUDA_MANAGED_FORCE_DEVICE_ALLOC", "1", 1);
+    if (getenv("NVBPF_FORCE_DEVICE_ALLOC") != nullptr) setenv("CUDA_MANAGED_FORCE_DEVICE_ALLOC", "1", 1);
     pthread_mutex_init(&launch_mutex, nullptr);
     if (const char* env = getenv("{_quote_cpp(analysis.filter_env)}")) {{
         filter_csv = env;
@@ -2054,7 +2068,7 @@ static void instrument_function_if_needed(CUcontext ctx, CUfunction func) {{
 
 void nvbit_at_init() {{
     setenv("ACK_CTX_INIT_LIMITATION", "1", 1);
-    setenv("CUDA_MANAGED_FORCE_DEVICE_ALLOC", "1", 1);
+    if (getenv("NVBPF_FORCE_DEVICE_ALLOC") != nullptr) setenv("CUDA_MANAGED_FORCE_DEVICE_ALLOC", "1", 1);
     pthread_mutex_init(&launch_mutex, nullptr);
     if (const char* env = getenv("{_quote_cpp(analysis.filter_env)}")) kernel_name_filter = env;
     if (const char* env = getenv("{_quote_cpp(analysis.threshold_env)}")) {{
@@ -2523,7 +2537,7 @@ static std::string kernel_name_filter;
 
 void nvbit_at_init() {{
     setenv("ACK_CTX_INIT_LIMITATION", "1", 1);
-    {"setenv(\"CUDA_MANAGED_FORCE_DEVICE_ALLOC\", \"1\", 1);" if has_device else ""}
+    {"if (getenv(\"NVBPF_FORCE_DEVICE_ALLOC\") != nullptr) setenv(\"CUDA_MANAGED_FORCE_DEVICE_ALLOC\", \"1\", 1);" if has_device else ""}
 {launch_state_init}
     kernel_name_filter = "{_quote_cpp(tool.kernel_filter_default)}";
     if (const char* env = getenv("{_quote_cpp(tool.kernel_filter_env)}")) {{
